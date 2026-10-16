@@ -1,0 +1,116 @@
+name: Build Daily Routine Tracker APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Check project files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f package.json
+          test -f capacitor.config.json
+          test -f index.html
+          test -f manifest.webmanifest
+          test -f sw.js
+          test -f patch_manifest.py
+          test -f MainActivity.java
+          test -f AlarmPlugin.java
+          test -f FocusBlockingPlugin.java
+          test -f FocusBlockingService.java
+
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+
+      # Capacitor needs its configured webDir to exist before `cap add android`.
+      - name: Prepare web assets before creating Android project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p www
+          cp index.html sw.js manifest.webmanifest icon-192.png icon-512.png www/
+          test -s www/index.html
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Install native Android classes and resources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          R=android/app/src/main/res
+          mkdir -p "$R"
+          rm -rf "$R/mipmap-anydpi-v26"
+          for p in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            d=${p%%:*}
+            s=${p##*:}
+            mkdir -p "$R/mipmap-$d"
+            cp "ic_$s.png" "$R/mipmap-$d/ic_launcher.png"
+            cp "ic_$s.png" "$R/mipmap-$d/ic_launcher_round.png"
+          done
+          J=android/app/src/main/java/com/mydaily/tracker
+          mkdir -p "$J"
+          cp AlarmPlugin.java AlarmReceiver.java AlarmActivity.java MainActivity.java FocusBlockingPlugin.java FocusBlockingService.java "$J/"
+          mkdir -p android/app/src/main/res/xml android/app/src/main/res/values
+          cat > android/app/src/main/res/xml/focus_blocking_accessibility_service.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/focus_blocking_service_description"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="100"
+              android:canRetrieveWindowContent="false"
+              android:accessibilityFlags="flagDefault" />
+          XML
+          cat > android/app/src/main/res/values/strings.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="focus_blocking_service_description">Optional focus mode redirects selected distracting apps while a focus timer is running. It does not read screen text.</string>
+          </resources>
+          XML
+          python3 patch_manifest.py
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Daily-Routine-Tracker-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+          
